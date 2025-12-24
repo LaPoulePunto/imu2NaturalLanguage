@@ -229,8 +229,9 @@ else:
     log_message("Compiling and training the MTL model...")
     # Compile the model with appropriate loss functions for each task
     mtl_model.compile(
-        optimizer='adam', loss=['categorical_crossentropy', 'mse'],
-        metrics=['accuracy']
+        optimizer='adam',
+        loss={'classification': 'categorical_crossentropy', 'regression': 'mse'},
+        metrics={'classification': ['accuracy'], 'regression': ['mse']}
     )
     log_message("MTL model compiled successfully.")
 
