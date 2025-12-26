@@ -17,3 +17,4 @@ __pycache__/
 results/logs/
 *.log
 *.h5
+*.keras

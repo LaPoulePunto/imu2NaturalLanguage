@@ -65,9 +65,11 @@ def log_message(message: str) -> None:
     logging.info(message)
 
 # File paths
-imu_data_file = 'data/all_x_dat_imu.pkl'
-gt_data_file = 'data/all_gt.pkl'
-model_file = 'data/mtl_model.h5'
+imu_data_file = 'data/all_x_dat_train_imu.pkl'
+gt_data_file  = 'data/all_train_gt.pkl'
+traj_data_file= 'data/all_y_dat_train.pkl'
+
+model_file = 'data/mtl_model.keras'
 
 # Load the provided pkl files
 start_time = time.time()
@@ -82,6 +84,13 @@ with open(gt_data_file, 'rb') as f:
     gt_data = pickle.load(f)
 log_message(f"Ground truth labels loaded successfully. Number of labels: {len(gt_data)}")
 
+# Load trajectory data
+with open(traj_data_file, 'rb') as f:
+    y_traj = pickle.load(f)
+    y_traj = np.array(y_traj)
+
+log_message(f"Trajectory data loaded. Shape: {y_traj.shape}")
+
 # Check if the number of IMU data samples matches the number of ground truth labels
 if len(imu_data) != len(gt_data):
     raise ValueError(
@@ -94,7 +103,8 @@ log_message(f"Step 1: Data Loading completed in {time.time() - start_time:.2f} s
 start_time = time.time()
 log_message("Converting ground truth labels to categorical format...")
 # Convert labels (A-Z) to numerical format for training
-gt_data_categorical = to_categorical([ord(label) - ord('A') for label in gt_data])
+# Les données sont déjà numériques, on les passe directement
+gt_data_categorical = to_categorical(gt_data)
 log_message(f"Ground truth labels converted successfully. Shape: {gt_data_categorical.shape}")
 log_message(f"Step 1: Data Conversion completed in {time.time() - start_time:.2f} seconds")
 
@@ -121,6 +131,17 @@ log_message(
     f"{imu_data_padded.shape}"
 )
 log_message(f"Step 1: Data Preprocessing completed in {time.time() - start_time:.2f} seconds")
+
+# If trajectory data is shorter than IMU data, pad it
+TARGET_LEN = imu_data_padded.shape[1]
+if y_traj.shape[1] != TARGET_LEN:
+    temp_traj = np.zeros((len(y_traj), TARGET_LEN, 2))
+    for i, t in enumerate(y_traj):
+        L = min(len(t), TARGET_LEN)
+        temp_traj[i, :L, :] = t[:L, :]
+    y_traj = temp_traj
+
+
 
 # Check if model file exists to avoid retraining
 if os.path.exists(model_file):
@@ -203,25 +224,45 @@ else:
     # Step 4: Multi-Task Learning (MTL)
     start_time = time.time()
     log_message("Creating MTL model with classification and regression heads...")
+
+
     # Classification head for predicting the character label
     classification_output = Dense(
         gt_data_categorical.shape[1], activation='softmax', name='classification'
     )(x)
     log_message(f"Classification head output shape: {classification_output.shape}")
-    # Regression head for predicting the trajectory
-    regression_output = Dense(
+    
+    
+    
+    # Autoencoder head for cleaning the IMU data
+    autoencoder_output = Dense(
         imu_data_padded.shape[1] * 13, activation='linear'
     )(x)
     # Reshape regression output to match original IMU data dimensions
-    regression_output = Reshape(
-        (imu_data_padded.shape[1], 13), name='regression'
-    )(regression_output)
-    log_message(f"Regression head output shape after reshape: {regression_output.shape}")
+    autoencoder_output = Reshape(
+        (imu_data_padded.shape[1], 13), name='autoencoder'
+    )(autoencoder_output)
+    log_message(f"Autoencoder head output shape after reshape: {autoencoder_output.shape}")
+
+    
+
+
+    # Regression head for predicting the trajectory
+    trajectory_output = Dense(
+        imu_data_padded.shape[1] * 2, activation='linear'
+    )(x)
+    trajectory_output = Reshape(
+        (imu_data_padded.shape[1], 2), name='trajectory'
+    )(trajectory_output)
+    log_message(f"Trajectory head output shape: {trajectory_output.shape}")
+
+
+
 
     log_message("Building MTL model...")
     # Create the MTL model combining both classification and regression outputs
     mtl_model = Model(
-        inputs=input_layer, outputs=[classification_output, regression_output]
+        inputs=input_layer, outputs=[classification_output, autoencoder_output, trajectory_output]
     )
     log_message("MTL model created successfully.")
 
@@ -230,8 +271,17 @@ else:
     # Compile the model with appropriate loss functions for each task
     mtl_model.compile(
         optimizer='adam',
-        loss={'classification': 'categorical_crossentropy', 'regression': 'mse'},
-        metrics={'classification': ['accuracy'], 'regression': ['mse']}
+        loss={
+            'classification': 'categorical_crossentropy',
+            'autoencoder': 'mse',
+            'trajectory': 'mse'
+        },
+        loss_weights={
+            'classification': 1.0, 
+            'autoencoder': 0.5,
+            'trajectory': 1.0
+        },
+        metrics={'classification': ['accuracy'], 'trajectory': ['mse']}
     )
     log_message("MTL model compiled successfully.")
 
@@ -239,7 +289,7 @@ else:
         log_message("Starting model training...")
     # Train the model on the IMU data and ground truth labels
     mtl_model.fit(
-        imu_data_padded, [gt_data_categorical, imu_data_padded],
+        imu_data_padded, [gt_data_categorical, imu_data_padded, y_traj],
         epochs=NUM_EPOCHS, batch_size=32, verbose=DISPLAY_TRAINING_PROGRESS
     )
     log_message("MTL model training completed.")
@@ -253,17 +303,25 @@ else:
 start_time = time.time()
 log_message("Evaluating model and displaying results...")
 # Predict character labels from IMU data
-predicted_labels, _ = mtl_model.predict(imu_data_padded)
+predicted_labels, _, _ = mtl_model.predict(imu_data_padded)
 # Convert predicted labels to character format
 predicted_chars = [chr(np.argmax(pred) + ord('A')) for pred in predicted_labels]
 # Ground truth characters
-ground_truth_chars = [chr(ord(label)) for label in gt_data]
+ground_truth_chars = [chr(int(label) + ord('A')) for label in gt_data]
 
 # Evaluate the model on the IMU data and get accuracy
+# Evaluate the model on the IMU data and get accuracy
 evaluation = mtl_model.evaluate(
-    imu_data_padded, [gt_data_categorical, imu_data_padded], verbose=0
+    imu_data_padded, [gt_data_categorical, imu_data_padded, y_traj], verbose=0, return_dict=True
 )
-classification_accuracy = evaluation[3]  # Accuracy of classification task
+log_message(f"Evaluation keys: {evaluation.keys()}")
+# Try to find the accuracy key dynamically or fallback to classification_accuracy
+acc_key = next((k for k in evaluation.keys() if 'accuracy' in k), None)
+if acc_key:
+    classification_accuracy = evaluation[acc_key]
+else:
+    log_message("WARNING: Could not find accuracy metric in evaluation results.")
+    classification_accuracy = 0.0
 
 # Create a table with IMU character, ground truth character, and accuracy
 table_data = []
