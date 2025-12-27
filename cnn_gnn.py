@@ -24,13 +24,11 @@ import time
 from typing import List, Tuple
 
 import numpy as np
-import torch
 from sklearn.preprocessing import MinMaxScaler
-from torch_geometric.nn import GCNConv
-from torch_geometric.data import Data
 from keras.models import Model, load_model
 from keras.layers import (
-    Conv1D, MaxPooling1D, Flatten, Dense, Input, Reshape, Dropout
+    Conv1D, Input, Dense, Dropout, Bidirectional, LSTM, GlobalAveragePooling1D,
+    RepeatVector, Concatenate
 )
 from keras.preprocessing.sequence import pad_sequences
 from keras.utils import to_categorical
@@ -149,120 +147,54 @@ if os.path.exists(model_file):
     mtl_model = load_model(model_file)
     log_message("Model loaded successfully.")
 else:
-    # Step 2: Feature Extraction using CNN
+    # Step 2: Feature Extraction & Sequence Modeling (CNN + LSTM)
     start_time = time.time()
-    log_message("Starting feature extraction using CNN...")
-    # Input layer for CNN model
+    log_message("Building CNN + LSTM architecture...")
+    
+    # Input layer
     input_layer = Input(shape=(imu_data_padded.shape[1], 13))
-    # Add multiple 1D Convolutional layers to extract features from IMU data
-    x = Conv1D(filters=64, kernel_size=3, activation='relu')(input_layer)
-    log_message(f"Conv1D layer 1 output shape: {x.shape}")
-    x = MaxPooling1D(pool_size=2)(x)
-    log_message(f"MaxPooling1D layer 1 output shape: {x.shape}")
-    x = Conv1D(filters=128, kernel_size=3, activation='relu')(x)
-    log_message(f"Conv1D layer 2 output shape: {x.shape}")
-    x = MaxPooling1D(pool_size=2)(x)
-    log_message(f"MaxPooling1D layer 2 output shape: {x.shape}")
-    # Dropout to reduce overfitting
+    
+    # CNN Layers (padding='same' to preserve sequence length)
+    x = Conv1D(filters=64, kernel_size=3, activation='relu', padding='same')(input_layer)
+    x = Conv1D(filters=128, kernel_size=3, activation='relu', padding='same')(x)
     x = Dropout(0.3)(x)
-    # Flatten the pooled feature maps into a single vector
-    x = Flatten()(x)
-    log_message(f"Flatten layer output shape: {x.shape}")
-    # Dense layer to learn complex representations
-    x = Dense(256, activation='relu')(x)
-    log_message(f"Dense layer output shape: {x.shape}")
-    log_message("Feature extraction using CNN completed.")
-    log_message(f"Step 2: Feature Extraction completed in {time.time() - start_time:.2f} seconds")
-
-    # Step 3: GNN for Relationship Modeling
-    start_time = time.time()
-    log_message("Creating GCN model for temporal relationships...")
-    # Create edge indices for the GCN to define the connectivity between nodes
-    edge_index = torch.tensor(
-        [[i, i + 1] for i in range(imu_data_padded.shape[1] - 1)],
-        dtype=torch.long
-    ).t().contiguous()
-    log_message(f"Edge index for GCN created. Edge index shape: {edge_index.shape}")
-    # Create the input tensor for GCN from the first IMU data sample
-    x_gnn = torch.tensor(imu_data_padded[0], dtype=torch.float)
-    log_message(f"Input tensor for GCN created. Tensor shape: {x_gnn.shape}")
-
-    # Create a Data object for the GCN
-    data = Data(x=x_gnn, edge_index=edge_index)
-    log_message("Data object for GCN created.")
-
-    # Define the GCN model
-    class GCN(torch.nn.Module):
-        def __init__(self):
-            super(GCN, self).__init__()
-            # First GCN layer with 13 input features and 64 output features
-            self.conv1 = GCNConv(13, 64)
-            # Second GCN layer with 64 input features and 128 output features
-            self.conv2 = GCNConv(64, 128)
-
-        def forward(self, data):
-            log_message("Running forward pass of GCN...")
-            x, edge_index = data.x, data.edge_index
-            # Apply first GCN layer and activation function
-            x = self.conv1(x, edge_index).relu()
-            log_message(f"GCNConv1 output shape: {x.shape}")
-            # Apply second GCN layer
-            x = self.conv2(x, edge_index)
-            log_message(f"GCNConv2 output shape: {x.shape}")
-            return x
-
-    log_message("Instantiating GCN model...")
-    # Instantiate and run the GCN model
-    gnn_model = GCN()
-    output_gnn = gnn_model(data)
-    log_message(
-        f"GCN model created and relationship modeling completed. "
-        f"GCN output shape: {output_gnn.shape}"
-    )
-    log_message(f"Step 3: GNN Relationship Modeling completed in {time.time() - start_time:.2f} seconds")
-
-    # Step 4: Multi-Task Learning (MTL)
-    start_time = time.time()
-    log_message("Creating MTL model with classification and regression heads...")
-
-
-    # Classification head for predicting the character label
+    
+    # LSTM Layer for temporal dependencies
+    # return_sequences=True keeps the time dimension (Batch, Steps, Features)
+    x = Bidirectional(LSTM(128, return_sequences=True))(x)
+    
+    # --- TASK HEADS ---
+    
+    # 1. Classification Head
+    # Collapse the sequence to a single vector for classification
+    y_class = GlobalAveragePooling1D()(x)
     classification_output = Dense(
         gt_data_categorical.shape[1], activation='softmax', name='classification'
-    )(x)
-    log_message(f"Classification head output shape: {classification_output.shape}")
+    )(y_class)
     
+    # 2. Autoencoder Head (Sequence-to-Sequence)
+    # Reconstructs the input IMU data (13 features) for each timestep
+    autoencoder_output = Dense(13, activation='linear', name='autoencoder')(x)
     
+    # 3. Trajectory Head (Sequence-to-Sequence) with CONDITIONING
+    # We take the classification probabilities (Batch, Classes), repeat them 
+    # for each timestep (Batch, Steps, Classes), and merge with the LSTM features.
+    # This tells the drawing arm WHAT letter it is supposed to draw.
     
-    # Autoencoder head for cleaning the IMU data
-    autoencoder_output = Dense(
-        imu_data_padded.shape[1] * 13, activation='linear'
-    )(x)
-    # Reshape regression output to match original IMU data dimensions
-    autoencoder_output = Reshape(
-        (imu_data_padded.shape[1], 13), name='autoencoder'
-    )(autoencoder_output)
-    log_message(f"Autoencoder head output shape after reshape: {autoencoder_output.shape}")
-
+    # Repeat the class probabilities to match the sequence length
+    class_context = RepeatVector(imu_data_padded.shape[1])(classification_output)
     
-
-
-    # Regression head for predicting the trajectory
-    trajectory_output = Dense(
-        imu_data_padded.shape[1] * 2, activation='linear'
-    )(x)
-    trajectory_output = Reshape(
-        (imu_data_padded.shape[1], 2), name='trajectory'
-    )(trajectory_output)
-    log_message(f"Trajectory head output shape: {trajectory_output.shape}")
-
-
-
-
-    log_message("Building MTL model...")
-    # Create the MTL model combining both classification and regression outputs
+    # Concatenate LSTM features (x) with Class Context
+    combined_features = Concatenate()([x, class_context])
+    
+    # Predict the (x, y) coordinate for each timestep using the combined knowledge
+    trajectory_output = Dense(2, activation='linear', name='trajectory')(combined_features)
+    
+    log_message("Building MTL model with conditioning...")
+    # Create the MTL model combining all outputs
     mtl_model = Model(
-        inputs=input_layer, outputs=[classification_output, autoencoder_output, trajectory_output]
+        inputs=input_layer, 
+        outputs=[classification_output, autoencoder_output, trajectory_output]
     )
     log_message("MTL model created successfully.")
 
@@ -274,12 +206,12 @@ else:
         loss={
             'classification': 'categorical_crossentropy',
             'autoencoder': 'mse',
-            'trajectory': 'mse'
+            'trajectory': 'mae'  # Switch to MAE for sharper reconstruction
         },
         loss_weights={
             'classification': 1.0, 
-            'autoencoder': 0.5,
-            'trajectory': 1.0
+            'autoencoder': 1.0,
+            'trajectory': 50.0  # Drastically increase weight to prioritize drawing
         },
         metrics={'classification': ['accuracy'], 'trajectory': ['mse']}
     )
