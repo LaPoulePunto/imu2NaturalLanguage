@@ -18,3 +18,9 @@ results/logs/
 *.log
 *.h5
 *.keras
+
+# Ignore generated test data (recreated on every training)
+data/test_*.pkl
+
+# Ignore visualization outputs
+viz_sample_*.png
