@@ -23,4 +23,4 @@ results/logs/
 data/test_*.pkl
 
 # Ignore visualization outputs
-viz_sample_*.png
+

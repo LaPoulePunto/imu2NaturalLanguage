@@ -66,3 +66,18 @@ Also see related methods implemented or referenced by this repository (examples)
 - "Joint Classification and Trajectory Regression of Online Handwriting using a Multi-Task Learning Approach", Ott et al., WACV 2022 — methodology closely followed for multi-task training in `cnn_gnn.py`.
 - Other related works (listed above) provide datasets and methods that can be added here as implementations are contributed.
 
+
+## Data Integrity & MTL updates
+
+1.  **Deduplication**: The source dataset contained significant duplicate entries (approx. 66%). This allowed models to "memorize" test samples that were identical to training samples. We now verify unique signatures (hashing) to remove all duplicates before training.
+2.  **Rigorous Split**: Data is split into 80% Training and 20% Verified Test Set.
+3.  **Trajectory Reconstruction**: A new head has been added to the MTL architecture in `cnn_gnn.py`, enabling the model to reconstruct handwriting trajectories ("tracer") in addition to classification.
+
+
+## Visualization Results
+
+The following samples were generated from the held-out test set, demonstrating the model's capability to reconstruct trajectories compared to ground truth.
+
+![Example 1](viz_results/viz_sample_27.png) 
+![Example 2](viz_results/viz_sample_40.png)
+![Example 3](viz_results/viz_sample_65.png)
