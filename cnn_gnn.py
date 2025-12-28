@@ -139,6 +139,34 @@ if y_traj.shape[1] != TARGET_LEN:
         temp_traj[i, :L, :] = t[:L, :]
     y_traj = temp_traj
 
+# --- DEDUPLICATION STEP ---
+log_message("Step 1.5: Removing duplicates from dataset...")
+unique_indices = []
+seen_hashes = set()
+duplicates_count = 0
+
+for i in range(len(imu_data_padded)):
+    # Hash the IMU content (bytes)
+    # We use the IMU signature to identify duplicates. 
+    # Assumption: If IMU is identical, Label and Traj should be too.
+    sample_hash = imu_data_padded[i].tobytes()
+    
+    if sample_hash not in seen_hashes:
+        seen_hashes.add(sample_hash)
+        unique_indices.append(i)
+    else:
+        duplicates_count += 1
+
+# Filter the arrays
+imu_data_padded = imu_data_padded[unique_indices]
+gt_data_categorical = gt_data_categorical[unique_indices]
+y_traj = y_traj[unique_indices]
+
+log_message(f"Deduplication complete.")
+log_message(f"Removed {duplicates_count} duplicates.")
+log_message(f"Remaining unique samples: {len(imu_data_padded)}")
+
+
 
 
 # Check if model file exists to avoid retraining
@@ -147,6 +175,41 @@ if os.path.exists(model_file):
     mtl_model = load_model(model_file)
     log_message("Model loaded successfully.")
 else:
+    # --- DATA SPLITTING (Train / Test) ---
+    from sklearn.model_selection import train_test_split
+
+    log_message("Splitting data into Training (80%) and Test (20%)...")
+    # We split all corresponding arrays together
+    # X: imu_data_padded
+    # y1: gt_data_categorical (labels)
+    # y2: imu_data_padded (autoencoder target is same as input)
+    # y3: y_traj (trajectory)
+    
+    # Stratify is good for classification balance, but complicates regression split. 
+    # Random split is usually fine for enough data.
+    X_train, X_test, y_class_train, y_class_test, y_traj_train, y_traj_test = train_test_split(
+        imu_data_padded, gt_data_categorical, y_traj, 
+        test_size=0.2, random_state=42
+    )
+    
+    # Autoencoder targets are just copies of the inputs
+    y_ae_train = X_train
+    y_ae_test = X_test
+
+    log_message(f"Train size: {len(X_train)} samples")
+    log_message(f"Test size:  {len(X_test)} samples")
+
+    # SAVE TEST DATA for data_viz.py
+    log_message("Saving Test Data for valid visualization...")
+    with open('data/test_imu.pkl', 'wb') as f:
+        pickle.dump(X_test, f)
+    with open('data/test_gt.pkl', 'wb') as f:
+        pickle.dump(y_class_test, f) # Saving categorical (one-hot)
+    with open('data/test_traj.pkl', 'wb') as f:
+        pickle.dump(y_traj_test, f)
+    log_message("Test data saved to data/test_*.pkl")
+
+
     # Step 2: Feature Extraction & Sequence Modeling (CNN + LSTM)
     start_time = time.time()
     log_message("Building CNN + LSTM architecture...")
@@ -221,7 +284,8 @@ else:
         log_message("Starting model training...")
     # Train the model on the IMU data and ground truth labels
     mtl_model.fit(
-        imu_data_padded, [gt_data_categorical, imu_data_padded, y_traj],
+        X_train, [y_class_train, y_ae_train, y_traj_train],
+        validation_data=(X_test, [y_class_test, y_ae_test, y_traj_test]),
         epochs=NUM_EPOCHS, batch_size=32, verbose=DISPLAY_TRAINING_PROGRESS
     )
     log_message("MTL model training completed.")
