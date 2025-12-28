@@ -12,13 +12,13 @@ Quickstart
 1. Install dependencies:
 
 ```bash
-pip install -r requirements.txt
+uv sync
 ```
 
 2. Run training or inference (script is a self-contained example):
 
 ```bash
-python cnn_gnn.py
+uv run cnn_gnn.py
 ```
 
 Files of interest
